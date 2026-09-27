@@ -232,7 +232,7 @@ final class Runner: @unchecked Sendable {
     private let classifier: Classifier
     private let config: Config
     private let debug: Bool
-    private let onFire: (EngineStatus.Fire) -> Void
+    private let onFire: @Sendable (EngineStatus.Fire) -> Void
     private let performer = ActionPerformer()
     private var debouncer: Debouncer
     private var lastDistance: Double?
@@ -249,7 +249,7 @@ final class Runner: @unchecked Sendable {
     /// ~1/3 s at 15 fps: shorter appearances are a hand passing through, not an attempt.
     private static let minEpisodeFrames = 5
 
-    init(classifier: Classifier, config: Config, debug: Bool, onFire: @escaping (EngineStatus.Fire) -> Void) {
+    init(classifier: Classifier, config: Config, debug: Bool, onFire: @escaping @Sendable (EngineStatus.Fire) -> Void) {
         self.classifier = classifier
         self.config = config
         self.debug = debug

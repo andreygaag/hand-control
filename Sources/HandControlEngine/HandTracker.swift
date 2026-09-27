@@ -16,7 +16,7 @@ public enum Detection: Sendable {
 public final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     public typealias FrameHandler = (_ detection: Detection, _ time: TimeInterval) -> Void
     /// Called on the tracker queue when idle mode switches; true = now idle.
-    public typealias ModeHandler = (_ idle: Bool) -> Void
+    public typealias ModeHandler = @Sendable (_ idle: Bool) -> Void
     /// Called when capture fails for good (session runtime error, camera disconnected).
     public typealias FailureHandler = @Sendable (_ reason: String) -> Void
 
