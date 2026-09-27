@@ -20,12 +20,27 @@ func hand(offset: Double = 0, scale: Double = 1, curl: Double = 0) -> [Point] {
         #expect(Features.distance(a, b) < 1e-9)
     }
 
-    @Test func keepsRotation() throws {
+    @Test(arguments: [15.0, 40.0, 90.0, 180.0])
+    func ignoresRotation(_ degrees: Double) throws {
+        let t = degrees * .pi / 180
         let up = hand()
-        let down = up.map { Point(x: -$0.x, y: -$0.y) }
+        let turned = up.map { Point(x: $0.x * cos(t) - $0.y * sin(t), y: $0.x * sin(t) + $0.y * cos(t)) }
         let a = try #require(Features.vector(from: up))
-        let b = try #require(Features.vector(from: down))
-        #expect(Features.distance(a, b) > 1)
+        let b = try #require(Features.vector(from: turned))
+        #expect(Features.distance(a, b) < 1e-9)
+    }
+
+    @Test func palmAxisPointsUp() throws {
+        let v = try #require(Features.vector(from: hand()))
+        // Middle MCP is joint 9; without the wrist it sits at index 8 → (x, y) at 16, 17.
+        #expect(abs(v[16]) < 1e-12)
+        #expect(abs(v[17] - 1) < 1e-12)
+    }
+
+    @Test func differentShapesStayApart() throws {
+        let open = try #require(Features.vector(from: hand()))
+        let curled = try #require(Features.vector(from: hand(curl: 1)))
+        #expect(Features.distance(open, curled) > 0.25)
     }
 
     @Test func rejectsDegenerateInput() {

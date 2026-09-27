@@ -23,9 +23,14 @@ public enum HandJoint {
 public enum Features {
     public static let dimension = (HandJoint.count - 1) * 2
 
-    /// Translation- and scale-invariant feature vector: joints relative to the wrist,
-    /// in units of palm length (wrist→middle MCP). Rotation is deliberately kept:
-    /// thumbs-up vs thumbs-down differ mainly by orientation, and the camera is fixed.
+    /// Translation-, scale- and rotation-invariant feature vector: joints relative to the
+    /// wrist, in units of palm length, rotated so the palm axis (wrist→middle MCP) points up.
+    ///
+    /// Rotation used to be kept so that orientation-only pairs (thumbs up vs down) differ.
+    /// Measured on recorded samples, that made a hand tilted ~20° from how it was recorded
+    /// cross maxDistance 0.25, and ~40° gave the d≈0.6 seen live: the angle drifts with posture
+    /// between sessions. Normalizing barely changed separation (closest pair 0.273 → 0.276).
+    /// Cost: gestures that differ only by orientation are now indistinguishable.
     public static func vector(from joints: [Point]) -> [Double]? {
         guard joints.count == HandJoint.count else { return nil }
         let wrist = joints[HandJoint.wrist]
@@ -33,11 +38,16 @@ public enum Features {
         let palm = hypot(mcp.x - wrist.x, mcp.y - wrist.y)
         guard palm > 1e-6 else { return nil }
 
+        // Unit palm axis (ux, uy). Rotating it onto (0, 1): x' = x·uy − y·ux, y' = x·ux + y·uy.
+        let ux = (mcp.x - wrist.x) / palm
+        let uy = (mcp.y - wrist.y) / palm
         var out: [Double] = []
         out.reserveCapacity(dimension)
         for (i, p) in joints.enumerated() where i != HandJoint.wrist {
-            out.append((p.x - wrist.x) / palm)
-            out.append((p.y - wrist.y) / palm)
+            let x = (p.x - wrist.x) / palm
+            let y = (p.y - wrist.y) / palm
+            out.append(x * uy - y * ux)
+            out.append(x * ux + y * uy)
         }
         return out
     }
