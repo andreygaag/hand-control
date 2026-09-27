@@ -58,13 +58,15 @@ func stopOnSignals() {
     }
 }
 
-/// Keeps the process and `owner` alive until a callback or Ctrl-C calls exit().
+/// Keeps the process and `owners` alive until a callback or Ctrl-C calls exit(). Swift may
+/// release a local after its last use, so anything that must outlive the wait (tracker,
+/// lock, engine) has to be passed here rather than merely held in the caller.
 /// Not dispatchMain(): async top-level code already drains the main queue, and calling
 /// dispatchMain() from here traps.
-func parkForever(_ owner: AnyObject) async throws -> Never {
+func parkForever(_ owners: AnyObject...) async throws -> Never {
     while true {
         try await Task.sleep(for: .seconds(3600))
-        extendLifetime(owner)
+        withExtendedLifetime(owners) {}
     }
 }
 
@@ -114,8 +116,7 @@ func record(_ args: Args) async throws -> Never {
         }
     }
     tracker.start()
-    extendLifetime(lock)
-    try await parkForever(tracker)
+    try await parkForever(tracker, lock)
 }
 
 func run(_ args: Args) async -> Never {
