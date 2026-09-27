@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # Needs a macOS 14+ SDK (Observation, continuity camera device type) and Swift 6.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Build
+        run: swift build
+      # Tests cover the hardware-free parts only; no camera or permissions are needed.
+      - name: Test
+        run: swift test

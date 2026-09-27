@@ -4,11 +4,11 @@ Swift package, macOS 14+. Apple Vision hand pose → kNN gestures → hotkeys. S
 
 ## Commands
 
-- Build: `swift build --package-path /Users/moveax3/Projects/hand-control`
-- Test: `swift test --package-path /Users/moveax3/Projects/hand-control` (Swift Testing)
-- Run: `/Users/moveax3/Projects/hand-control/.build/debug/hand-control {record <name>|run [--debug]|list|delete <name>|cameras|camera-readers}`
-- App: `/Users/moveax3/Projects/hand-control/scripts/build-app.sh [--install]` →
-  `/Users/moveax3/Projects/hand-control/build/HandControl.app` (`--install` copies it to `~/Applications`
+- Build: `swift build` (all commands from the repo root)
+- Test: `swift test` (Swift Testing)
+- Run: `.build/debug/hand-control {record <name>|run [--debug]|list|delete <name>|cameras|camera-readers}`
+- App: `scripts/build-app.sh [--install]` →
+  `build/HandControl.app` (`--install` copies it to `~/Applications`
   and refuses while the app runs). Signs with the first "Apple Development" identity (`SIGN_IDENTITY`
   overrides): a stable signature keeps TCC grants across rebuilds, ad-hoc does not.
 - Testing the app without permission prompts or real key events: run
@@ -39,6 +39,10 @@ Swift package, macOS 14+. Apple Vision hand pose → kNN gestures → hotkeys. S
 - main.swift uses top-level `await`, which already drains the main queue: never call `dispatchMain()`
   (it traps). Keep the process alive with `parkForever`.
 - Swift Testing's `#expect` cannot call mutating methods; compute into a local first.
+- CI builds with Xcode 16 (Swift 6.0), older than local toolchains: avoid newer-only APIs such as
+  `extendLifetime` (use `withExtendedLifetime`) and the value-returning `#expect(throws:)`.
+- A local may be released after its last use: whatever must outlive `parkForever` (tracker, lock,
+  engine) is passed to it, not just held by the caller.
 - Camera readers depend on undocumented camera-daemon log lines; if `camera-readers` misbehaves after
   a macOS update, re-capture them with `log stream --info --predicate 'process ENDSWITH "camerad"'`
   and update the fixtures in `CameraClientsTests` (copy exact messages, never reconstruct them).

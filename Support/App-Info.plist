@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>dev.moveax3.HandControl</string>
+	<string>io.github.andreygaag.HandControl</string>
 	<key>CFBundleName</key>
 	<string>HandControl</string>
 	<key>CFBundleDisplayName</key>

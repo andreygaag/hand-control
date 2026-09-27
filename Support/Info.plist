@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>dev.moveax3.hand-control</string>
+	<string>io.github.andreygaag.hand-control</string>
 	<key>CFBundleName</key>
 	<string>hand-control</string>
 	<key>NSCameraUsageDescription</key>

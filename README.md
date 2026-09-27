@@ -1,17 +1,70 @@
 # hand-control
 
-Control macOS windows and spaces with hand gestures seen by the camera.
+Trigger macOS hotkeys and system actions with hand gestures seen by your Mac's camera.
+
+Record a pose once (a fist, a peace sign, whatever you like), bind it to a key combo such as
+`ctrl+right` for the next Space, and show it to the camera. Everything runs locally with Apple's
+Vision framework: no network, no third-party models, no frames stored.
+
+- **Your own gestures.** Record 30 samples of any static hand pose; a nearest-neighbour classifier
+  recognizes it regardless of where the hand is in the frame, how far it is, or how it is tilted.
+- **Hotkeys and system actions.** Bind a gesture to any key combo, or to sleeping the Mac or its
+  display.
+- **Menu bar app.** Runs in the background with a status icon, pause (releases the camera),
+  config reload and launch at login.
+- **Who else is using the camera.** The menu shows how many other apps are streaming the camera and
+  which processes may own the streams (best effort, see [below](#other-camera-readers)).
+- **Light on resources.** After 3 s without a hand, tracking drops to 2 fps: measured at about
+  3–6 % of one core on an M3 Pro while waiting for a hand.
+
+Requires macOS 14 or later and Swift 6 (Xcode 16+). Developed and tested on an M3 Pro with
+macOS 26 and the built-in FaceTime HD camera.
+
+## Quick start
 
 ```sh
+git clone https://github.com/andreygaag/hand-control.git
+cd hand-control
 swift build
-.build/debug/hand-control record fist      # 30 samples; vary the hand slightly
+
+# Record gestures: a 3 s countdown, then 30 samples. Move and tilt the hand a little.
+.build/debug/hand-control record fist
 .build/debug/hand-control record peace
-.build/debug/hand-control record none      # optional: idle poses that must never fire
+.build/debug/hand-control list            # samples per gesture and how well they separate
+
+# Bind them (see Configuration), then try it with per-frame output:
 $EDITOR ~/.config/hand-control/config.json
 .build/debug/hand-control run --debug
 ```
 
-`config.json`:
+The first run asks for Camera access; hotkey bindings also need Accessibility. From a terminal
+both are granted to the terminal app.
+
+## Menu bar app
+
+```sh
+scripts/build-app.sh --install        # release build, signed, copied to ~/Applications
+open ~/Applications/HandControl.app
+```
+
+Grant the app Camera and Accessibility on first launch, then use **Reload Config**; if an error
+remains, quit and relaunch. The script signs with the first "Apple Development" identity in your
+keychain (override with `SIGN_IDENTITY`). With ad-hoc signing (`SIGN_IDENTITY=-`) the app works,
+but macOS asks for permissions again after every rebuild.
+
+The icon is a filled hand while tracking, an outline hand while idle or starting, a crossed-out
+hand when paused and a warning sign on error. The menu shows the exact state, the last gesture that
+fired, the bindings and the other camera readers, and has Pause, Reload Config, Open Config, Open
+Event Log and Launch at Login (available only for the installed copy).
+
+The app does not watch its files: after editing `config.json` or recording a gesture, use Reload
+Config. With the same data dir, the app, `hand-control run` and `hand-control record` exclude each
+other ("hand-control is already running (pid N)"); quit the app to record.
+
+## Configuration
+
+`~/.config/hand-control/config.json` (created on first use; set `HAND_CONTROL_DIR` to use another
+directory):
 
 ```json
 {
@@ -21,53 +74,91 @@ $EDITOR ~/.config/hand-control/config.json
   "bindings": {
     "fist":  { "hotkey": "ctrl+right" },
     "peace": { "hotkey": "ctrl+left" },
-    "fuk":   { "system": "sleep" }
+    "sleep": { "system": "sleep" }
   }
 }
 ```
 
-Action types: `{"hotkey": "<mods>+<key>"}` and `{"system": "sleep" | "displaySleep"}` (via `/usr/bin/pmset`).
+| Key | Meaning |
+|---|---|
+| `holdMs` | How long a pose must be held before it fires. |
+| `releaseMs` | How long the pose must be gone before the same gesture can fire again. |
+| `maxDistance` | Reject threshold: average joint distance from the recorded samples, in palm lengths (0.25 = a quarter of a palm). |
+| `bindings` | Gesture name → action. Recorded gestures without a binding still take part in recognition: record a `none` gesture of idle poses so that they never fire. |
 
-Significant events (fires, misses, idle/active, pause/resume/reload, errors, start/stop) are logged to
-`~/Library/Logs/hand-control.log`: `tail -f ~/Library/Logs/hand-control.log`.
-After 3 s without a hand, tracking drops from 15 to 2 fps to save CPU; a gesture shown after a pause
-may take up to 0.5 s longer to fire.
+Actions:
 
-## Menu bar app
+- `{"hotkey": "<modifiers>+<key>"}`. Modifiers: `ctrl`, `alt`/`opt`, `cmd`, `shift`, `fn`. Keys:
+  `a`–`z`, `0`–`9`, `left`/`right`/`up`/`down`, `f1`–`f12`, `space`, `return`, `tab`, `esc`,
+  `delete`, `forwarddelete`, `home`, `end`, `pageup`, `pagedown`, `-`, `=`, `[`, `]`, `;`, `'`, `,`,
+  `.`, `/`, `\`, `` ` ``. Key codes are physical ANSI positions, independent of the input language.
+- `{"system": "sleep"}` or `{"system": "displaySleep"}`, via `/usr/bin/pmset`.
 
-```sh
-scripts/build-app.sh --install        # builds, signs, copies to ~/Applications
-open ~/Applications/HandControl.app
+To switch Spaces with `ctrl+left/right` or `ctrl+1..9`, enable those shortcuts under System
+Settings → Keyboard → Keyboard Shortcuts → Mission Control.
+
+## Commands
+
+```
+hand-control record <gesture> [--samples N] [--camera NAME]   record samples (appends)
+hand-control run [--debug] [--camera NAME]                    recognize and fire actions
+hand-control list                                             gestures, bindings, separation
+hand-control delete <gesture>                                 forget a gesture's samples
+hand-control cameras                                          list camera names for --camera
+hand-control camera-readers                                   other camera streams, see below
 ```
 
-It runs the same engine as `run` in the background. The icon is a filled hand while tracking, an
-outline hand while idle or starting, a crossed-out hand when paused and a warning sign on error; the
-menu shows the exact state. The menu has pause (releases the camera), reload config, open config /
-event log, launch at login (only from the installed copy) and "other camera readers": how many other
-camera streams are running and which processes may own them (best effort, from the system log; see
-ARCHITECTURE.md).
+`list` shows `nearest-other`, the smallest distance between a gesture and any other: below
+`maxDistance` the two can be confused, so re-record one of them more distinctly.
 
-The app does not watch its files: after editing `config.json` or recording a gesture, use
-"Reload Config". With the same data dir, the app, `hand-control run` and `hand-control record`
-exclude each other ("hand-control is already running (pid N)"): quit the app to record.
+## Troubleshooting
 
-`hand-control camera-readers` prints the readers list in the terminal. It sees less than the menu:
-a running Hand Control app counts as a foreign stream there, and "started a stream" marks come only
-from live log lines, which a one-shot command rarely catches.
+Significant events go to `~/Library/Logs/hand-control.log` (`tail -f` it, or use Open Event Log):
+start, fires, misses, idle/active switches, pause/resume/reload, errors.
 
-Grant the app Camera and Accessibility on first launch. After granting, use "Reload Config"; if the
-error stays, quit and relaunch the app.
+- **The hand is seen but nothing fires.** Look for
+  `no gesture: hand shown N frames, closest fist d=0.31 (maxDistance 0.25)`: the pose was recognized
+  but is too far from its samples. Re-record it the way you hold it now, or run `run --debug` to see
+  per-frame distances.
+- **A gesture fires by accident.** Record a `none` gesture from the poses that trigger it, or raise
+  `holdMs`.
+- **Hotkeys do nothing.** Accessibility is missing for the app (or terminal) running hand-control;
+  without it macOS silently drops synthetic key events.
 
-Permissions for the CLI: grant Camera and Accessibility to the terminal app you run it from. Switching spaces with
-`ctrl+left/right` or `ctrl+1..9` requires those shortcuts to be enabled under
-System Settings → Keyboard → Keyboard Shortcuts → Mission Control.
+Hand rotation is ignored on purpose, so gestures that differ only by tilt (thumbs up vs thumbs
+down) cannot be told apart. macOS Reactions use some of the same gestures (thumbs up, peace): the
+app asks macOS to keep Reactions gesture detection off by default for itself, but a video call app
+with Reactions on will still show balloons for your peace sign.
 
-A miss is logged as `no gesture: hand shown N frames, closest fist d=0.31 (maxDistance 0.25)`: the
-gesture was recognized but too far from its samples — re-record it the way you now hold it.
-Hand rotation does not matter (gestures that differ only by tilt, like thumbs up vs down, cannot be
-told apart).
+## Other camera readers
 
-`maxDistance` is the RMS per-joint distance in palm lengths (0.25 = joints a quarter of a palm off on
-average). `run --debug` prints the per-frame candidate, its distance and why a frame was unreliable.
-`list` prints samples per gesture and `nearest-other`, the smallest distance to another gesture: if it
-is below `maxDistance`, the two gestures can be confused.
+macOS has no public API that names the processes using the camera. hand-control reads the camera
+daemon's log (`appleh13camerad` on the tested Mac): stream attributions give the number of
+streams, client connections give the candidate processes. So the menu can say "2 other streams,
+possible owners: zoom.us, Safari", but not which one owns which stream. Streams opened more than an
+hour before launch are missed until they restart, the log messages are undocumented and may change
+with any macOS update, and other cameras and camera daemons (USB, iPhone) are unverified.
+`hand-control camera-readers` prints the same information in a terminal, counting a running Hand
+Control app as a foreign stream.
+
+## Privacy
+
+Frames go from the camera to Apple's Vision framework in memory and are discarded. The only data
+written to disk is `gestures.json` (21 joint coordinates per recorded sample, no images),
+`config.json` and the event log. Nothing is sent over the network.
+
+## Development
+
+```sh
+swift build && swift test      # tests need no camera or permissions
+```
+
+Pure logic (features, classifier, debouncer, config, log parsing) lives in `HandControlCore` and is
+unit-tested; OS integration lives in `HandControlEngine`; the CLI and the menu bar app are thin
+front ends. [ARCHITECTURE.md](ARCHITECTURE.md) describes the pipeline, invariants and the
+measurements behind the design decisions; [CLAUDE.md](CLAUDE.md) holds commands and pitfalls for
+coding agents.
+
+## License
+
+[MIT](LICENSE)

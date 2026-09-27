@@ -55,7 +55,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: dir) }
 
         var config = Config()
-        config.bindings = ["fist": .hotkey(try KeyCombo("cmd+shift+4")), "fuk": .system(.sleep)]
+        config.bindings = ["fist": .hotkey(try KeyCombo("cmd+shift+4")), "sleep": .system(.sleep)]
         try config.save(to: dir.appendingPathComponent("config.json"))
         #expect(try Config.load(from: dir.appendingPathComponent("config.json")) == config)
 

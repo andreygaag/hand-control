@@ -14,9 +14,13 @@ import Testing
     @Test func secondHolderIsRefusedWithOwnerPid() throws {
         let url = tempLock()
         let first = try InstanceLock(at: url)
-        let error = #expect(throws: HandControlError.self) { try InstanceLock(at: url) }
-        #expect(error?.description.contains("pid \(getpid())") == true)
-        extendLifetime(first)
+        do {
+            _ = try InstanceLock(at: url)
+            Issue.record("second lock succeeded")
+        } catch let error as HandControlError {
+            #expect(error.description.contains("pid \(getpid())"))
+        }
+        withExtendedLifetime(first) {}
     }
 
     @Test func releasedLockCanBeTakenAgain() throws {
