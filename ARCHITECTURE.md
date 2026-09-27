@@ -5,8 +5,8 @@ Hand gestures seen by the Mac camera trigger actions (for now: synthetic hotkeys
 ## Pipeline
 
 ```
-AVCaptureSession (640x480; frames throttled by FrameRateGovernor)   HandTracker.swift
- │   15 fps to Vision; 5 fps after 3 s without a hand; back to 15 on any hand frame
+AVCaptureSession (640x480, capture fixed at 15 fps; FrameRateGovernor throttles)   HandTracker.swift
+ │   15 fps to Vision; 2 fps after max(3 s, release + 1 s) without a hand; back to 15 on any hand frame
  └─ VNDetectHumanHandPoseRequest → 21 joints, MediaPipe order, x scaled by aspect
      └─ Features.vector: relative to wrist, / palm length    HandPose.swift
          └─ Classifier.classify: kNN (k=5) + maxDistance reject   Classifier.swift
@@ -37,8 +37,10 @@ AVCaptureSession (640x480; frames throttled by FrameRateGovernor)   HandTracker.
 - Any recorded label votes in kNN; a label without a binding acts as a reject class (e.g. "none").
 - `system` actions are a closed list (`SystemCommand`), never a free-form shell command.
 - `Action` is a closed enum; adding an effect type means a new case and a new branch in `ActionPerformer`.
-- Idle frame interval (0.2 s) must stay below the debouncer's `maxGap` (0.25 s), or idle absence
-  frames would break release continuity.
+- Idle frames (0.5 s apart) exceed the debouncer's `maxGap` (0.25 s), so each restarts the release
+  timer. Idling therefore waits until release has completed at the active rate
+  (`idleAfter >= releaseMs + 1 s`); otherwise a latched pose would never release while idle.
+- Camera frame durations must be set after `startRunning()`; set before, they are silently reset.
 - Camera callbacks, classification, debouncing and action dispatch all run on the tracker's serial queue.
 
 ## Observability

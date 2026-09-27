@@ -74,6 +74,30 @@ import Testing
         #expect(feed(["fist", "?", "fist", "?", "fist"]) == ["fist"])
     }
 
+    // Idle mode feeds absence frames farther apart than maxGap. This is safe only once the
+    // latch has been released at the active rate (main.swift delays idling past release).
+    @Test func idleRateAbsenceAfterReleaseAllowsRefire() {
+        var d = Debouncer(hold: 0.375, release: 0.25, maxGap: 0.25)
+        var fired: [String] = []
+        func step(_ o: Observation, _ t: Double) { if let f = d.update(o, at: t) { fired.append(f) } }
+        for i in 0...3 { step(.pose("fist"), Double(i) * 0.125) }        // fires at 0.375
+        for i in 4...16 { step(.absent, Double(i) * 0.125) }             // released at active rate
+        for t in stride(from: 2.5, through: 5.0, by: 0.5) { step(.absent, t) }  // idle, 2 fps
+        for i in 0...3 { step(.pose("fist"), 5.5 + Double(i) * 0.125) }  // wake: gap 0.5 > maxGap
+        #expect(fired == ["fist", "fist"])
+    }
+
+    // Why idling must wait for release: with only idle-rate frames, the latch never releases.
+    @Test func idleRateAbsenceNeverReleasesALatch() {
+        var d = Debouncer(hold: 0.375, release: 0.25, maxGap: 0.25)
+        var fired: [String] = []
+        func step(_ o: Observation, _ t: Double) { if let f = d.update(o, at: t) { fired.append(f) } }
+        for i in 0...3 { step(.pose("fist"), Double(i) * 0.125) }
+        for t in stride(from: 1.0, through: 3.0, by: 0.5) { step(.absent, t) }
+        for i in 0...5 { step(.pose("fist"), 3.5 + Double(i) * 0.125) }
+        #expect(fired == ["fist"])
+    }
+
     @Test func longDropoutBreaksHold() {
         #expect(feed(["fist", "fist", "?", "?", "?", "fist", "fist"]).isEmpty)
     }

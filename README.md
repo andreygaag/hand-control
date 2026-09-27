@@ -30,7 +30,8 @@ Action types: `{"hotkey": "<mods>+<key>"}` and `{"system": "sleep" | "displaySle
 
 Significant events (fires, idle/active, errors, start/stop) are logged to
 `~/Library/Logs/hand-control.log`: `tail -f ~/Library/Logs/hand-control.log`.
-After 3 s without a hand, tracking drops from 15 to 5 fps to save CPU.
+After 3 s without a hand, tracking drops from 15 to 2 fps to save CPU; a gesture shown after a pause
+may take up to 0.5 s longer to fire.
 
 Permissions: grant Camera and Accessibility to the terminal app you run it from. Switching spaces with
 `ctrl+left/right` or `ctrl+1..9` requires those shortcuts to be enabled under

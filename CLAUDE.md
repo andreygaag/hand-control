@@ -11,8 +11,9 @@ Swift package, macOS 14+. Apple Vision hand pose → kNN gestures → hotkeys. S
 - Event log: `~/Library/Logs/hand-control.log`, or `$HAND_CONTROL_DIR/hand-control.log` when set.
 - Measuring cost: run with `HAND_CONTROL_DIR` pointing at a scratch copy of gestures and
   `{"bindings": {}}` — no key events, no Accessibility needed — and sample with
-  `top -l 11 -s 1 -pid <pid> -stats pid,cpu,power`. Idle baseline (debug build, M3 Pro): ~6.6% CPU vs
-  ~15.5% before idle mode.
+  `top -l 11 -s 1 -pid <pid> -stats pid,cpu,power`; include `appleh13camerad` (camera daemon).
+  Run-to-run noise is ±2% CPU: alternate builds and repeat; one run proves nothing.
+- Release vs debug build: no measurable CPU difference (Vision dominates); release saves ~30 MB.
 
 ## Constraints and pitfalls
 

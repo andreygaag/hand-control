@@ -51,10 +51,13 @@ let eventLogURL = ProcessInfo.processInfo.environment["HAND_CONTROL_DIR"] != nil
 
 /// Frames per second fed to Vision; the camera runs faster, extra frames are dropped.
 let trackingFPS = 15.0
-/// Rate after `idleAfter` without a hand. Its interval (0.2 s) must stay below
-/// `maxObservationGap`, or idle absence frames would break release continuity.
-let idleFPS = 5.0
-let idleAfter: TimeInterval = 3
+/// Rate after `minIdleAfter` without a hand. Waking costs up to one idle interval (0.5 s)
+/// before the hold starts.
+let idleFPS = 2.0
+/// Idle frames are farther apart than `maxObservationGap`, and every such gap restarts the
+/// release timer. A latched pose must therefore finish its release at the active rate
+/// before going idle, so idling waits for at least release + 1 s.
+let minIdleAfter: TimeInterval = 3
 /// Unobserved time after which a hold or release loses continuity (~3 frames at 15 fps).
 let maxObservationGap: TimeInterval = 0.25
 /// Minimum spacing between recorded samples: consecutive frames are near-duplicates.
@@ -236,6 +239,7 @@ func run(_ args: Args) async throws -> Never {
     }
 
     let runner = Runner(classifier: classifier, config: config, debug: args.flags.contains("debug"))
+    let idleAfter = max(minIdleAfter, Double(config.releaseMs) / 1000 + 1)
     let governor = FrameRateGovernor(activeFPS: trackingFPS, idleFPS: idleFPS, idleAfter: idleAfter)
     let tracker = try await startTracking(camera: args.options["camera"], governor: governor, onFrame: runner.handle)
     let bound = config.bindings.keys.sorted().map { "\($0)=\(config.bindings[$0]!)" }
