@@ -33,6 +33,7 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
     ]
 
     private let session = AVCaptureSession()
+    private let device: AVCaptureDevice
     private let queue = DispatchQueue(label: "hand-control.camera")
     private let request = VNDetectHumanHandPoseRequest()
     private var governor: FrameRateGovernor
@@ -50,16 +51,16 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
         precondition(Self.jointOrder.count == HandJoint.count)
         self.governor = governor
         self.onFrame = onFrame
+        let found: AVCaptureDevice?
+        if let name = cameraName?.lowercased() {
+            found = Self.cameras().first { $0.localizedName.lowercased().contains(name) }
+        } else {
+            found = AVCaptureDevice.default(for: .video) ?? Self.cameras().first
+        }
+        guard let found else { throw CLIError("camera not found; see `hand-control cameras`") }
+        device = found
         request.maximumHandCount = 1
         super.init()
-
-        let device: AVCaptureDevice?
-        if let name = cameraName?.lowercased() {
-            device = Self.cameras().first { $0.localizedName.lowercased().contains(name) }
-        } else {
-            device = AVCaptureDevice.default(for: .video) ?? Self.cameras().first
-        }
-        guard let device else { throw CLIError("camera not found; see `hand-control cameras`") }
 
         session.beginConfiguration()
         // Vision cost scales with resolution; 640x480 is plenty for one close hand.
@@ -73,14 +74,13 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
         guard session.canAddOutput(output) else { throw CLIError("cannot attach video output") }
         session.addOutput(output)
         session.commitConfiguration()
-        let fps = Self.limitFrameRate(of: device, to: governor.activeFPS)
-        event("camera: \(device.localizedName), \(fps) fps")
     }
 
     /// Asks the camera itself for `fps` instead of its default 30, so frames we would drop
     /// anyway are never captured or delivered. Clamped to what the active format supports
     /// (FaceTime HD: 15–30), which is why idle throttling below that stays in software.
-    /// Must run after the session preset is applied: setting a preset resets frame durations.
+    /// Must run after startRunning(): durations set before it are silently reset (measured:
+    /// set before start → 23 fps delivered, set after start → 15 fps).
     private static func limitFrameRate(of device: AVCaptureDevice, to fps: Double) -> Double {
         let ranges = device.activeFormat.videoSupportedFrameRateRanges
         guard let lowest = ranges.map(\.minFrameRate).min(),
@@ -100,7 +100,11 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
         return target
     }
 
-    func start() { session.startRunning() }
+    func start() {
+        session.startRunning()
+        let fps = Self.limitFrameRate(of: device, to: governor.activeFPS)
+        event("camera: \(device.localizedName), \(fps) fps")
+    }
     func stop() { session.stopRunning() }
 
     func captureOutput(_: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from _: AVCaptureConnection) {
