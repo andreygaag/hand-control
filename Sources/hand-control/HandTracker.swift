@@ -16,6 +16,10 @@ enum Detection {
 final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     typealias FrameHandler = (_ detection: Detection, _ time: TimeInterval) -> Void
 
+    /// Slack for the throttle: with the camera running at exactly the active rate, frame
+    /// timestamps land on the interval boundary and tiny jitter would drop every other frame.
+    private static let timestampJitter: TimeInterval = 0.01
+
     /// Below this whole-hand confidence the frame is unreliable. Uncalibrated.
     private static let minHandConfidence: Float = 0.5
 
@@ -69,7 +73,31 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
         guard session.canAddOutput(output) else { throw CLIError("cannot attach video output") }
         session.addOutput(output)
         session.commitConfiguration()
-        event("camera: \(device.localizedName)")
+        let fps = Self.limitFrameRate(of: device, to: governor.activeFPS)
+        event("camera: \(device.localizedName), \(fps) fps")
+    }
+
+    /// Asks the camera itself for `fps` instead of its default 30, so frames we would drop
+    /// anyway are never captured or delivered. Clamped to what the active format supports
+    /// (FaceTime HD: 15–30), which is why idle throttling below that stays in software.
+    /// Must run after the session preset is applied: setting a preset resets frame durations.
+    private static func limitFrameRate(of device: AVCaptureDevice, to fps: Double) -> Double {
+        let ranges = device.activeFormat.videoSupportedFrameRateRanges
+        guard let lowest = ranges.map(\.minFrameRate).min(),
+              let highest = ranges.map(\.maxFrameRate).max()
+        else { return 0 }
+        let target = min(max(fps, lowest), highest)
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            let duration = CMTime(value: 1000, timescale: CMTimeScale((target * 1000).rounded()))
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+        } catch {
+            event("camera: cannot set frame rate: \(error)")
+            return 1 / device.activeVideoMinFrameDuration.seconds
+        }
+        return target
     }
 
     func start() { session.startRunning() }
@@ -79,7 +107,7 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
         let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
         // Throttling happens before Vision, which is where the CPU goes. The camera itself
         // keeps delivering at its native rate; dropping those frames is cheap.
-        guard time - lastProcessed >= governor.interval else { return }
+        guard time - lastProcessed >= governor.interval - Self.timestampJitter else { return }
         lastProcessed = time
         let detection = detect(sampleBuffer)
         let handPresent = if case .absent = detection { false } else { true }
