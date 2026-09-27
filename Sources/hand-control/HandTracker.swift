@@ -34,7 +34,9 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
 
     private let session = AVCaptureSession()
     private let device: AVCaptureDevice
-    private let queue = DispatchQueue(label: "hand-control.camera")
+    /// .utility lets the scheduler keep this work on efficiency cores: a hotkey arriving a
+    /// few ms later is invisible next to the 300 ms hold, and the process runs all day.
+    private let queue = DispatchQueue(label: "hand-control.camera", qos: .utility)
     private let request = VNDetectHumanHandPoseRequest()
     private var governor: FrameRateGovernor
     private let onFrame: FrameHandler
