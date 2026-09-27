@@ -2,16 +2,23 @@ import CoreGraphics
 import Foundation
 import HandControlCore
 
-struct ActionPerformer {
+public struct ActionPerformer: Sendable {
     /// Synthetic key events need the Accessibility permission; without it they are
     /// silently dropped. The request call shows the system prompt once.
-    static func ensureAccess() -> Bool {
+    public static func ensureAccess() -> Bool {
         CGPreflightPostEventAccess() || CGRequestPostEventAccess()
     }
 
-    private let source = CGEventSource(stateID: .hidSystemState)
+    /// Whether any binding needs synthetic key events (and so the Accessibility permission).
+    public static func needsKeyEvents(_ config: Config) -> Bool {
+        config.bindings.values.contains { if case .hotkey = $0 { true } else { false } }
+    }
 
-    func perform(_ action: Action) throws {
+    public init() {}
+
+    private var source: CGEventSource? { CGEventSource(stateID: .hidSystemState) }
+
+    public func perform(_ action: Action) throws {
         switch action {
         case .hotkey(let combo):
             try send(combo)
@@ -33,14 +40,14 @@ struct ActionPerformer {
         try process.run()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
-            throw CLIError("pmset \(verb) exited with \(process.terminationStatus)")
+            throw HandControlError("pmset \(verb) exited with \(process.terminationStatus)")
         }
     }
 
     private func send(_ combo: KeyCombo) throws {
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: combo.keyCode, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: combo.keyCode, keyDown: false)
-        else { throw CLIError("cannot create key event for \(combo)") }
+        else { throw HandControlError("cannot create key event for \(combo)") }
         let flags = Self.flags(for: combo)
         down.flags = flags
         up.flags = flags

@@ -21,6 +21,12 @@ public struct FrameRateGovernor: Sendable {
     public var interval: TimeInterval { isIdle ? idleInterval : activeInterval }
     public var activeFPS: Double { 1 / activeInterval }
 
+    /// Back to full rate with a fresh absence timer, e.g. when capture restarts after a pause.
+    public mutating func reset() {
+        isIdle = false
+        absentSince = nil
+    }
+
     /// Feed one processed frame. Returns true when idle state changed.
     public mutating func update(handPresent: Bool, at time: TimeInterval) -> Bool {
         if handPresent {

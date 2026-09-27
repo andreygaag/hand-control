@@ -1,30 +1,6 @@
 import Foundation
 import HandControlCore
-
-struct CLIError: Error, CustomStringConvertible {
-    let description: String
-    init(_ description: String) { self.description = description }
-}
-
-func log(_ message: String) {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
-}
-
-/// Significant events (start/stop, fires, mode changes, errors) go to stderr and to
-/// `eventLogURL`; per-frame chatter goes to stderr only. Each line is one O_APPEND write,
-/// so lines from different threads do not interleave. No rotation: volume is a few lines
-/// per gesture.
-private let eventTimestamp = Date.ISO8601FormatStyle(
-    dateTimeSeparator: .space, includingFractionalSeconds: true, timeZone: .current)
-
-func event(_ message: String) {
-    log(message)
-    let line = "\(Date().formatted(eventTimestamp)) \(message)\n"
-    let fd = open(eventLogURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
-    guard fd >= 0 else { return }
-    defer { close(fd) }
-    _ = line.utf8CString.withUnsafeBufferPointer { write(fd, $0.baseAddress, $0.count - 1) }
-}
+import HandControlEngine
 
 let usage = """
 usage:
@@ -33,6 +9,8 @@ usage:
   hand-control list
   hand-control delete <gesture>
   hand-control cameras
+  hand-control camera-readers    other camera streams and their possible owners (best effort,
+                                 from the system log; counts a running Hand Control app too)
 
 data dir: $HAND_CONTROL_DIR or ~/.config/hand-control
   gestures.json  recorded samples (written by `record`)
@@ -40,28 +18,7 @@ data dir: $HAND_CONTROL_DIR or ~/.config/hand-control
 event log: ~/Library/Logs/hand-control.log ($HAND_CONTROL_DIR/hand-control.log if set)
 """
 
-let dataDir = ProcessInfo.processInfo.environment["HAND_CONTROL_DIR"].map { URL(fileURLWithPath: $0) }
-    ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/hand-control")
-let gesturesURL = dataDir.appendingPathComponent("gestures.json")
-let configURL = dataDir.appendingPathComponent("config.json")
-// ~/Library/Logs is where Console.app looks; an explicit data dir keeps test runs isolated.
-let eventLogURL = ProcessInfo.processInfo.environment["HAND_CONTROL_DIR"] != nil
-    ? dataDir.appendingPathComponent("hand-control.log")
-    : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/hand-control.log")
-
-/// Frames per second fed to Vision; the camera runs faster, extra frames are dropped.
-let trackingFPS = 15.0
-/// Rate after `minIdleAfter` without a hand. Waking costs up to one idle interval (0.5 s)
-/// before the hold starts.
-let idleFPS = 2.0
-/// Idle frames are farther apart than `maxObservationGap`, and every such gap restarts the
-/// release timer. A latched pose must therefore finish its release at the active rate
-/// before going idle, so idling waits for at least release + 1 s.
-let minIdleAfter: TimeInterval = 3
-/// Unobserved time after which a hold or release loses continuity (~3 frames at 15 fps).
-let maxObservationGap: TimeInterval = 0.25
-/// Minimum spacing between recorded samples: consecutive frames are near-duplicates.
-let recordInterval: TimeInterval = 0.2
+let paths = Paths.current
 
 struct Args {
     var positional: [String] = []
@@ -74,7 +31,7 @@ struct Args {
             if a.hasPrefix("--") {
                 let name = String(a.dropFirst(2))
                 if valued.contains(name) {
-                    guard let v = it.next() else { throw CLIError("--\(name) needs a value") }
+                    guard let v = it.next() else { throw HandControlError("--\(name) needs a value") }
                     options[name] = v
                 } else {
                     flags.insert(name)
@@ -86,28 +43,6 @@ struct Args {
     }
 }
 
-func loadConfig() throws -> Config {
-    guard FileManager.default.fileExists(atPath: configURL.path) else {
-        try Config().save(to: configURL)
-        log("created \(configURL.path)")
-        return Config()
-    }
-    return try Config.load(from: configURL)
-}
-
-func startTracking(camera: String?, governor: FrameRateGovernor,
-                   onFrame: @escaping HandTracker.FrameHandler) async throws -> HandTracker {
-    guard await HandTracker.requestAccess() else {
-        throw CLIError("no camera access: System Settings → Privacy & Security → Camera, enable your terminal")
-    }
-    let tracker = try HandTracker(cameraName: camera, governor: governor, onFrame: onFrame)
-    tracker.start()
-    return tracker
-}
-
-/// Keeps the process and the tracker alive until a frame callback or Ctrl-C calls exit().
-/// Not dispatchMain(): async top-level code already drains the main queue, and calling
-/// dispatchMain() from here traps.
 /// Logs "stopped" on Ctrl-C / kill before exiting, so the event log shows session bounds.
 nonisolated(unsafe) var signalSources: [DispatchSourceSignal] = []
 func stopOnSignals() {
@@ -123,10 +58,13 @@ func stopOnSignals() {
     }
 }
 
-func parkForever(_ tracker: HandTracker) async throws -> Never {
+/// Keeps the process and `owner` alive until a callback or Ctrl-C calls exit().
+/// Not dispatchMain(): async top-level code already drains the main queue, and calling
+/// dispatchMain() from here traps.
+func parkForever(_ owner: AnyObject) async throws -> Never {
     while true {
         try await Task.sleep(for: .seconds(3600))
-        extendLifetime(tracker)
+        extendLifetime(owner)
     }
 }
 
@@ -139,11 +77,16 @@ final class Recording: @unchecked Sendable {
 }
 
 func record(_ args: Args) async throws -> Never {
-    guard args.positional.count == 1, let name = args.positional.first else { throw CLIError(usage) }
+    guard args.positional.count == 1, let name = args.positional.first else { throw HandControlError(usage) }
     let target = Int(args.options["samples"] ?? "30") ?? 0
-    guard target > 0 else { throw CLIError("--samples must be a positive integer") }
-    _ = try loadConfig()
-    let rec = Recording(store: try GestureStore.load(from: gesturesURL))
+    guard target > 0 else { throw HandControlError("--samples must be a positive integer") }
+    // Without the lock a running app or `run` would fire actions while the gesture is shown.
+    let lock = try InstanceLock(at: paths.lock)
+    _ = try Engine.loadConfig(at: paths.config)
+    let rec = Recording(store: try GestureStore.load(from: paths.gestures))
+    guard await HandTracker.requestAccess() else {
+        throw HandControlError("no camera access: System Settings → Privacy & Security → Camera")
+    }
 
     for n in (1...3).reversed() {
         log("show '\(name)' in \(n)…")
@@ -152,17 +95,17 @@ func record(_ args: Args) async throws -> Never {
     log("recording — move and tilt the hand slightly for variety")
 
     // No idle mode while recording: the user is about to show the hand.
-    let governor = FrameRateGovernor(activeFPS: trackingFPS, idleFPS: trackingFPS, idleAfter: .infinity)
-    let tracker = try await startTracking(camera: args.options["camera"], governor: governor) { detection, time in
+    let governor = FrameRateGovernor(activeFPS: Tuning.trackingFPS, idleFPS: Tuning.trackingFPS, idleAfter: .infinity)
+    let tracker = try HandTracker(cameraName: args.options["camera"], governor: governor) { detection, time in
         guard case .hand(let joints) = detection else { return }
-        guard time - rec.lastTaken >= recordInterval else { return }
+        guard time - rec.lastTaken >= Tuning.recordInterval else { return }
         rec.lastTaken = time
         rec.store.samples[name, default: []].append(joints)
         rec.taken += 1
         log("  \(rec.taken)/\(target)")
         guard rec.taken == target else { return }
         do {
-            try rec.store.save(to: gesturesURL)
+            try rec.store.save(to: paths.gestures)
             event("recorded '\(name)': \(rec.store.samples[name]!.count) samples total")
             exit(0)
         } catch {
@@ -170,87 +113,26 @@ func record(_ args: Args) async throws -> Never {
             exit(1)
         }
     }
+    tracker.start()
+    extendLifetime(lock)
     try await parkForever(tracker)
 }
 
-final class Runner: @unchecked Sendable {
-    let classifier: Classifier
-    let config: Config
-    let debug: Bool
-    let performer = ActionPerformer()
-    var debouncer: Debouncer
-    var lastDistance: Double?
-
-    init(classifier: Classifier, config: Config, debug: Bool) {
-        self.classifier = classifier
-        self.config = config
-        self.debug = debug
-        debouncer = Debouncer(
-            hold: Double(config.holdMs) / 1000,
-            release: Double(config.releaseMs) / 1000,
-            maxGap: maxObservationGap)
+func run(_ args: Args) async -> Never {
+    let engine = Engine(cameraName: args.options["camera"], debug: args.flags.contains("debug"))
+    do {
+        try await engine.start()
+    } catch {
+        exit(1) // Engine.start already reported it (event log and stderr).
     }
-
-    func handle(_ detection: Detection, at time: TimeInterval) {
-        let observation: Observation
-        switch detection {
-        case .absent:
-            observation = .absent
-            if debug { log("no hand") }
-        case .unreliable(let reason):
-            observation = .unreliable
-            if debug { log("unreliable: \(reason)") }
-        case .hand(let joints):
-            let result = Features.vector(from: joints).flatMap(classifier.classify)
-            observation = result.map { .pose($0.label) } ?? .unreliable
-            lastDistance = result?.distance
-            if debug {
-                log(result.map {
-                    String(format: "%@ d=%.3f%@", $0.candidate, $0.distance, $0.label == nil ? " (rejected)" : "")
-                } ?? "unreliable: degenerate hand geometry")
-            }
-        }
-        guard let fired = debouncer.update(observation, at: time) else { return }
-        guard let action = config.bindings[fired] else {
-            if debug { log("→ \(fired): no binding") }
-            return
-        }
-        let distance = lastDistance.map { String(format: " d=%.3f", $0) } ?? ""
-        event("fire \(fired)\(distance) → \(action)")
-        do {
-            try performer.perform(action)
-        } catch {
-            event("error: \(fired): \(error)")
-        }
-    }
-}
-
-func run(_ args: Args) async throws -> Never {
-    let config = try loadConfig()
-    let store = try GestureStore.load(from: gesturesURL)
-    let classifier = Classifier(samples: store.samples, maxDistance: config.maxDistance)
-    guard !classifier.isEmpty else { throw CLIError("no gestures recorded; run `hand-control record <name>`") }
-    for label in config.bindings.keys.sorted() where store.samples[label] == nil {
-        log("warning: binding '\(label)' has no recorded samples")
-    }
-    let needsKeyEvents = config.bindings.values.contains { if case .hotkey = $0 { true } else { false } }
-    guard !needsKeyEvents || ActionPerformer.ensureAccess() else {
-        throw CLIError("no Accessibility access: System Settings → Privacy & Security → Accessibility, enable your terminal, then restart it")
-    }
-
-    let runner = Runner(classifier: classifier, config: config, debug: args.flags.contains("debug"))
-    let idleAfter = max(minIdleAfter, Double(config.releaseMs) / 1000 + 1)
-    let governor = FrameRateGovernor(activeFPS: trackingFPS, idleFPS: idleFPS, idleAfter: idleAfter)
-    let tracker = try await startTracking(camera: args.options["camera"], governor: governor, onFrame: runner.handle)
-    let bound = config.bindings.keys.sorted().map { "\($0)=\(config.bindings[$0]!)" }
-    event("started: \(bound.isEmpty ? "no bindings" : bound.joined(separator: ", ")); maxDistance=\(config.maxDistance)")
     stopOnSignals()
-    try await parkForever(tracker)
+    try? await parkForever(engine)
+    exit(0)
 }
 
 func list() throws {
-    let store = try GestureStore.load(from: gesturesURL)
-    let config = try loadConfig()
+    let store = try GestureStore.load(from: paths.gestures)
+    let config = try Engine.loadConfig(at: paths.config)
     let separation = Classifier(samples: store.samples, maxDistance: config.maxDistance).separation()
     for label in store.samples.keys.sorted() {
         let binding = config.bindings[label].map { "\($0)" } ?? "unbound"
@@ -259,27 +141,53 @@ func list() throws {
     }
 }
 
+func cameraReaders() async throws {
+    let monitor = CameraMonitor()
+    monitor.start()
+    // History replay takes a few seconds; the monitor bounds it with its own timeout.
+    var snapshot = monitor.snapshot(engineStreaming: false)
+    while snapshot.loading {
+        try await Task.sleep(for: .milliseconds(200))
+        snapshot = monitor.snapshot(engineStreaming: false)
+    }
+    monitor.stop()
+    if let error = snapshot.error { throw HandControlError("camera monitor: \(error)") }
+    print("other camera streams: \(snapshot.foreignStreams)")
+    for client in snapshot.candidates {
+        print("  \(client.name) (pid \(client.pid))\(client.startedStream ? " — started a stream" : "")")
+    }
+}
+
 func delete(_ args: Args) throws {
-    guard args.positional.count == 1, let name = args.positional.first else { throw CLIError(usage) }
-    var store = try GestureStore.load(from: gesturesURL)
-    guard store.samples.removeValue(forKey: name) != nil else { throw CLIError("no gesture '\(name)'") }
-    try store.save(to: gesturesURL)
+    guard args.positional.count == 1, let name = args.positional.first else { throw HandControlError(usage) }
+    var store = try GestureStore.load(from: paths.gestures)
+    guard store.samples.removeValue(forKey: name) != nil else { throw HandControlError("no gesture '\(name)'") }
+    try store.save(to: paths.gestures)
     event("deleted '\(name)'")
 }
 
+let argv = CommandLine.arguments
+let args: Args
 do {
-    let argv = CommandLine.arguments
-    guard argv.count >= 2 else { throw CLIError(usage) }
-    let args = try Args(argv.dropFirst(2), valued: ["samples", "camera"])
+    guard argv.count >= 2 else { throw HandControlError(usage) }
+    args = try Args(argv.dropFirst(2), valued: ["samples", "camera"])
+} catch {
+    // Usage mistakes go to the terminal only, not to the event log.
+    log("\(error)")
+    exit(1)
+}
+
+do {
     switch argv[1] {
     case "record": try await record(args)
-    case "run": try await run(args)
+    case "run": await run(args)
     case "list": try list()
     case "delete": try delete(args)
     case "cameras": HandTracker.cameras().forEach { print($0.localizedName) }
-    default: throw CLIError(usage)
+    case "camera-readers": try await cameraReaders()
+    default: throw HandControlError(usage)
     }
-} catch let error as CLIError where error.description == usage {
+} catch let error as HandControlError where error.description == usage {
     log(usage)
     exit(1)
 } catch {

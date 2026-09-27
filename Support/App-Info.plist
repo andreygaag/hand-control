@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>dev.moveax3.HandControl</string>
+	<key>CFBundleName</key>
+	<string>HandControl</string>
+	<key>CFBundleDisplayName</key>
+	<string>Hand Control</string>
+	<key>CFBundleExecutable</key>
+	<string>HandControl</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<!-- Menu bar only: no Dock icon, no main menu. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Hand Control tracks your hand to trigger window-management hotkeys.</string>
+	<!-- macOS Reactions share gestures with ours (thumbs up, peace) and would draw effects
+	     into our frames. Default them off for this app; the user can still re-enable them
+	     in Control Center. Honored since macOS 14.4 per AVCaptureDevice.h. -->
+	<key>NSCameraReactionEffectGesturesEnabledDefault</key>
+	<false/>
+</dict>
+</plist>

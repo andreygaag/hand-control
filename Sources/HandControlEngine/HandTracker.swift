@@ -2,7 +2,7 @@ import AVFoundation
 import HandControlCore
 import Vision
 
-enum Detection {
+public enum Detection: Sendable {
     case hand([Point])
     case absent
     /// Vision failed or returned a hand that cannot be trusted; `reason` is for --debug.
@@ -13,8 +13,12 @@ enum Detection {
 ///
 /// @unchecked Sendable: every mutable field is touched only on `queue`, which is the
 /// sample-buffer delegate queue. `onFrame` is also invoked on `queue`.
-final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
-    typealias FrameHandler = (_ detection: Detection, _ time: TimeInterval) -> Void
+public final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+    public typealias FrameHandler = (_ detection: Detection, _ time: TimeInterval) -> Void
+    /// Called on the tracker queue when idle mode switches; true = now idle.
+    public typealias ModeHandler = (_ idle: Bool) -> Void
+    /// Called when capture fails for good (session runtime error, camera disconnected).
+    public typealias FailureHandler = @Sendable (_ reason: String) -> Void
 
     /// Slack for the throttle: with the camera running at exactly the active rate, frame
     /// timestamps land on the interval boundary and tiny jitter would drop every other frame.
@@ -40,26 +44,30 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
     private let request = VNDetectHumanHandPoseRequest()
     private var governor: FrameRateGovernor
     private let onFrame: FrameHandler
+    private let onModeChange: ModeHandler?
+    private var observers: [NSObjectProtocol] = []
     private var lastProcessed = -TimeInterval.infinity
 
-    static func cameras() -> [AVCaptureDevice] {
+    public static func cameras() -> [AVCaptureDevice] {
         AVCaptureDevice.DiscoverySession(
             deviceTypes: [.builtInWideAngleCamera, .external, .continuityCamera],
             mediaType: .video, position: .unspecified
         ).devices
     }
 
-    init(cameraName: String?, governor: FrameRateGovernor, onFrame: @escaping FrameHandler) throws {
+    public init(cameraName: String?, governor: FrameRateGovernor, onModeChange: ModeHandler? = nil,
+                onFailure: FailureHandler? = nil, onFrame: @escaping FrameHandler) throws {
         precondition(Self.jointOrder.count == HandJoint.count)
         self.governor = governor
         self.onFrame = onFrame
+        self.onModeChange = onModeChange
         let found: AVCaptureDevice?
         if let name = cameraName?.lowercased() {
             found = Self.cameras().first { $0.localizedName.lowercased().contains(name) }
         } else {
             found = AVCaptureDevice.default(for: .video) ?? Self.cameras().first
         }
-        guard let found else { throw CLIError("camera not found; see `hand-control cameras`") }
+        guard let found else { throw HandControlError("camera not found; see `hand-control cameras`") }
         device = found
         request.maximumHandCount = 1
         super.init()
@@ -68,14 +76,33 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
         // Vision cost scales with resolution; 640x480 is plenty for one close hand.
         if session.canSetSessionPreset(.vga640x480) { session.sessionPreset = .vga640x480 }
         let input = try AVCaptureDeviceInput(device: device)
-        guard session.canAddInput(input) else { throw CLIError("cannot open \(device.localizedName)") }
+        guard session.canAddInput(input) else { throw HandControlError("cannot open \(device.localizedName)") }
         session.addInput(input)
         let output = AVCaptureVideoDataOutput()
         output.alwaysDiscardsLateVideoFrames = true
         output.setSampleBufferDelegate(self, queue: queue)
-        guard session.canAddOutput(output) else { throw CLIError("cannot attach video output") }
+        guard session.canAddOutput(output) else { throw HandControlError("cannot attach video output") }
         session.addOutput(output)
         session.commitConfiguration()
+
+        if let onFailure {
+            let center = NotificationCenter.default
+            observers.append(center.addObserver(
+                forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: nil
+            ) { note in
+                let error = note.userInfo?[AVCaptureSessionErrorKey] as? Error
+                onFailure("camera error: \(error.map { "\($0)" } ?? "unknown")")
+            })
+            observers.append(center.addObserver(
+                forName: AVCaptureDevice.wasDisconnectedNotification, object: device, queue: nil
+            ) { [name = device.localizedName] _ in
+                onFailure("camera disconnected: \(name)")
+            })
+        }
+    }
+
+    deinit {
+        observers.forEach(NotificationCenter.default.removeObserver)
     }
 
     /// Asks the camera itself for `fps` instead of its default 30, so frames we would drop
@@ -102,14 +129,47 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
         return target
     }
 
-    func start() {
+    public var cameraName: String { device.localizedName }
+
+    /// Blocks until the camera runs (AVFoundation's startRunning is synchronous); keep it
+    /// off the main thread. Returns the frame rate actually requested from the camera.
+    @discardableResult
+    public func start() -> Double {
+        // A pause taken while idle must not resume idle: start at full rate.
+        queue.sync {
+            governor.reset()
+            lastProcessed = -.infinity
+        }
         session.startRunning()
         let fps = Self.limitFrameRate(of: device, to: governor.activeFPS)
         event("camera: \(device.localizedName), \(fps) fps")
+        return fps
     }
-    func stop() { session.stopRunning() }
 
-    func captureOutput(_: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from _: AVCaptureConnection) {
+    /// Releases the camera (the green light goes off). Blocking, like start(). Drains frames
+    /// already queued, so no action fires after stop() returns.
+    public func stop() {
+        session.stopRunning()
+        queue.sync {}
+    }
+
+    /// Runs `block` on the tracker queue, serialized with frame handling.
+    public func onQueue(_ block: @escaping @Sendable () -> Void) { queue.async(execute: block) }
+
+    /// Current idle state, read on the tracker queue (authoritative, unlike the order in
+    /// which mode-change callbacks may be delivered elsewhere).
+    public var isIdle: Bool { queue.sync { governor.isIdle } }
+
+    /// Swaps the rate governor (e.g. after releaseMs changed). Capture continues at full rate.
+    public func replaceGovernor(_ newGovernor: FrameRateGovernor) {
+        queue.async { [self] in
+            let wasIdle = governor.isIdle
+            governor = newGovernor
+            if wasIdle { onModeChange?(false) }
+        }
+    }
+
+    public func captureOutput(_: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from _: AVCaptureConnection) {
         let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
         // Throttling happens before Vision, which is where the CPU goes. The camera itself
         // keeps delivering at its native rate; dropping those frames is cheap.
@@ -119,6 +179,7 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
         let handPresent = if case .absent = detection { false } else { true }
         if governor.update(handPresent: handPresent, at: time) {
             event(governor.isIdle ? "idle: no hand, tracking at reduced rate" : "active: hand seen")
+            onModeChange?(governor.isIdle)
         }
         onFrame(detection, time)
     }
@@ -157,7 +218,7 @@ final class HandTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
         return .hand(joints)
     }
 
-    static func requestAccess() async -> Bool {
+    public static func requestAccess() async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized: true
         case .notDetermined: await AVCaptureDevice.requestAccess(for: .video)

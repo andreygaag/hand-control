@@ -15,15 +15,24 @@ let package = Package(
     name: "hand-control",
     platforms: [.macOS(.v14)],
     targets: [
+        // Pure logic: features, kNN, debouncing, config, log parsing. Unit-tested.
         .target(name: "HandControlCore"),
+        // OS integration shared by the CLI and the app: camera, Vision, key events, engine.
+        .target(name: "HandControlEngine", dependencies: ["HandControlCore"]),
+        // Menu bar app; packaged into HandControl.app by scripts/build-app.sh with
+        // Support/App-Info.plist as the bundle's Info.plist (the CLI embeds Support/Info.plist).
+        .executableTarget(name: "HandControlApp", dependencies: ["HandControlEngine"]),
         .executableTarget(
             name: "hand-control",
-            dependencies: ["HandControlCore"],
+            dependencies: ["HandControlCore", "HandControlEngine"],
             linkerSettings: [
                 .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT",
                               "-Xlinker", "__info_plist", "-Xlinker", infoPlist]),
             ]
         ),
         .testTarget(name: "HandControlCoreTests", dependencies: ["HandControlCore"]),
+        // Only hardware-free pieces (lock, paths); camera, Vision and key events are not
+        // exercised here.
+        .testTarget(name: "HandControlEngineTests", dependencies: ["HandControlEngine"]),
     ]
 )

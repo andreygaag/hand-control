@@ -32,6 +32,17 @@ import Testing
         #expect(!g.isIdle)
     }
 
+    @Test func resetRestoresActiveAndRestartsAbsenceTimer() {
+        var g = governor()
+        _ = feed(&g, [(false, 0), (false, 1)])
+        #expect(g.isIdle)
+        g.reset()
+        #expect(!g.isIdle)
+        #expect(g.interval == 0.0625)
+        // The absence timer starts over from the first frame after the reset.
+        #expect(feed(&g, [(false, 5), (false, 5.5), (false, 6)]) == [false, false, true])
+    }
+
     @Test func infiniteIdleAfterNeverIdles() {
         var g = FrameRateGovernor(activeFPS: 15, idleFPS: 15, idleAfter: .infinity)
         #expect(feed(&g, [(false, 0), (false, 1e9)]) == [false, false])
